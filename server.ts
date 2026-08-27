@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
-import { handleBusArrival, handleApiStatus } from './api/busArrival.ts';
+import { handleBusArrival, handleApiStatus } from './api/busArrival';
 
 async function startServer() {
   const app = express();
