@@ -3,13 +3,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
 import { SearchFilter } from './components/SearchFilter';
 import { ArrivalCard } from './components/ArrivalCard';
 import { BUS_SERVICES, ALL_BUS_STOPS } from './data/busServices';
 import { BusService, BusStopOption } from './types';
-import { Bus, MapPin, ChevronRight, Bookmark, ArrowUpDown, Search, ShieldCheck } from 'lucide-react';
+import {
+  Bus,
+  MapPin,
+  ChevronRight,
+  Bookmark,
+  ArrowUpDown,
+  Search,
+  ShieldCheck,
+  Radio,
+  RefreshCw,
+  Server
+} from 'lucide-react';
+import {
+  fetchLiveBusArrival,
+  checkBackendApiStatus,
+  parseLtaBusUnit,
+  ApiConnectionStatus,
+} from './services/ltaApi';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('bus');
@@ -21,7 +38,13 @@ export default function App() {
   const [servicesData, setServicesData] = useState<BusService[]>(BUS_SERVICES);
   const [currentTime, setCurrentTime] = useState<string>('14:34 SGT');
   const [stopSearchFilter, setStopSearchFilter] = useState('');
-
+  const [apiStatus, setApiStatus] = useState<ApiConnectionStatus>({
+    hasCredential: false,
+    endpoint: '/api/bus-arrival',
+  });
+  const [isLiveFromLta, setIsLiveFromLta] = useState(false);
+  const [countdownSeconds, setCountdownSeconds] = useState(20);
+  const [lastUpdatedTime, setLastUpdatedTime] = useState<string>('');
 
   // Clock simulation
   useEffect(() => {
@@ -37,42 +60,121 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Periodic ETA simulated countdown (every 30 seconds)
-  const handleRefresh = () => {
+  // Check backend API credential status on load
+  useEffect(() => {
+    checkBackendApiStatus().then((status) => {
+      setApiStatus(status);
+    });
+  }, []);
+
+  // Fetch live bus arrival from backend API
+  const fetchArrivalsFromBackend = useCallback(async () => {
+    const targetService = servicesData.find((s) => s.serviceNumber === selectedServiceNo) || servicesData[0];
+    const targetDirection = targetService.directions.find((d) => d.directionNumber === selectedDirection) || targetService.directions[0];
+    const targetStopCode = selectedStopNo || targetDirection.stops[0]?.stopCode || '83139';
+
     setIsRefreshing(true);
-    setTimeout(() => {
-      setServicesData((prev) =>
-        prev.map((service) => ({
-          ...service,
-          directions: service.directions.map((dir) => ({
-            ...dir,
-            stops: dir.stops.map((stop) => {
-              // jitter ETA slightly for realistic live feed
-              const nextMins = Math.max(0, stop.nextBus.estimatedArrivalMinutes);
+
+    try {
+      const res = await fetchLiveBusArrival(targetStopCode, selectedServiceNo);
+
+      if (res.success && res.data && res.data.Services && res.data.Services.length > 0) {
+        setIsLiveFromLta(true);
+        const ltaSvc = res.data.Services.find((s) => s.ServiceNo === selectedServiceNo) || res.data.Services[0];
+
+        if (ltaSvc) {
+          const next = parseLtaBusUnit(ltaSvc.NextBus);
+          const subsequent = parseLtaBusUnit(ltaSvc.NextBus2);
+          const third = parseLtaBusUnit(ltaSvc.NextBus3);
+
+          setServicesData((prev) =>
+            prev.map((service) => {
+              if (service.serviceNumber !== selectedServiceNo) return service;
               return {
-                ...stop,
-                nextBus: {
-                  ...stop.nextBus,
-                  estimatedArrivalMinutes: nextMins === 0 ? 9 : Math.max(0, nextMins - 1),
-                },
-                subsequentBus: {
-                  ...stop.subsequentBus,
-                  estimatedArrivalMinutes: Math.max(
-                    nextMins + 5,
-                    stop.subsequentBus.estimatedArrivalMinutes - 1
-                  ),
-                },
+                ...service,
+                directions: service.directions.map((dir) => {
+                  if (dir.directionNumber !== selectedDirection) return dir;
+                  return {
+                    ...dir,
+                    stops: dir.stops.map((st) => {
+                      if (st.stopCode === targetStopCode && next) {
+                        return {
+                          ...st,
+                          nextBus: next,
+                          subsequentBus: subsequent || {
+                            ...st.subsequentBus,
+                            estimatedArrivalMinutes: next.estimatedArrivalMinutes + 8,
+                          },
+                          thirdBus: third || undefined,
+                        };
+                      }
+                      return st;
+                    }),
+                  };
+                }),
               };
-            }),
-          })),
-        }))
-      );
+            })
+          );
+        }
+      } else {
+        // Credential not configured or fallback simulated refresh
+        setIsLiveFromLta(false);
+        setServicesData((prev) =>
+          prev.map((service) => ({
+            ...service,
+            directions: service.directions.map((dir) => ({
+              ...dir,
+              stops: dir.stops.map((stop) => {
+                const nextMins = Math.max(0, stop.nextBus.estimatedArrivalMinutes);
+                return {
+                  ...stop,
+                  nextBus: {
+                    ...stop.nextBus,
+                    estimatedArrivalMinutes: nextMins === 0 ? 9 : Math.max(0, nextMins - 1),
+                  },
+                  subsequentBus: {
+                    ...stop.subsequentBus,
+                    estimatedArrivalMinutes: Math.max(
+                      nextMins + 5,
+                      stop.subsequentBus.estimatedArrivalMinutes - 1
+                    ),
+                  },
+                };
+              }),
+            })),
+          }))
+        );
+      }
+    } catch {
+      setIsLiveFromLta(false);
+    } finally {
       setIsRefreshing(false);
-    }, 600);
+      setCountdownSeconds(20);
+      setLastUpdatedTime(new Date().toLocaleTimeString());
+    }
+  }, [selectedServiceNo, selectedDirection, selectedStopNo, servicesData]);
+
+  // Periodic 20-second automatic refresh loop (as per LTA DataMall v3 specification)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCountdownSeconds((prev) => {
+        if (prev <= 1) {
+          fetchArrivalsFromBackend();
+          return 20;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [fetchArrivalsFromBackend]);
+
+  const handleRefresh = () => {
+    fetchArrivalsFromBackend();
   };
 
   const handleEstimateArrivalTime = () => {
-    handleRefresh();
+    fetchArrivalsFromBackend();
   };
 
   const currentService =
@@ -120,14 +222,51 @@ export default function App() {
         {/* Tab 1: NextBus Arrival Timings (Main Screen Matching Screenshot) */}
         {activeTab === 'bus' && (
           <div className="space-y-6">
-            {/* Page Header */}
-            <div id="page-header" className="space-y-1.5">
-              <h1 className="text-3xl sm:text-4xl font-extrabold text-[#0e3e5b] tracking-tight">
-                NextBus Arrival Timings
-              </h1>
-              <p className="text-slate-500 text-sm sm:text-base font-normal">
-                Find out the estimated arrival time of your next bus!
-              </p>
+            {/* Page Header and Backend Live Status */}
+            <div id="page-header" className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="space-y-1.5">
+                <div className="flex items-center space-x-2.5">
+                  <h1 className="text-3xl sm:text-4xl font-extrabold text-[#0e3e5b] tracking-tight">
+                    NextBus Arrival Timings
+                  </h1>
+                  {isLiveFromLta ? (
+                    <span className="inline-flex items-center space-x-1.5 bg-emerald-50 text-emerald-700 border border-emerald-300 px-2.5 py-0.5 rounded-full text-xs font-bold shadow-2xs">
+                      <Radio className="w-3 h-3 text-emerald-600 animate-pulse" />
+                      <span>Live LTA v3</span>
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center space-x-1.5 bg-slate-100 text-slate-700 border border-slate-300 px-2.5 py-0.5 rounded-full text-xs font-semibold">
+                      <Server className="w-3 h-3 text-slate-500" />
+                      <span>Backend API Ready</span>
+                    </span>
+                  )}
+                </div>
+                <p className="text-slate-500 text-sm sm:text-base font-normal">
+                  Find out the estimated arrival time of your next bus via LTA DataMall v3 service!
+                </p>
+              </div>
+
+              {/* 20-Second Refresh Countdown & Manual Refresh */}
+              <div className="flex items-center space-x-3 bg-white px-3.5 py-2 rounded-xl border border-slate-200 shadow-2xs self-start md:self-auto text-xs text-slate-600">
+                <div className="flex items-center space-x-1.5">
+                  <RefreshCw className={`w-3.5 h-3.5 text-[#0f4c75] ${isRefreshing ? 'animate-spin' : ''}`} />
+                  <span>Auto-refresh:</span>
+                  <span className="font-mono font-bold text-[#0e3e5b]">{countdownSeconds}s</span>
+                </div>
+                {lastUpdatedTime && (
+                  <span className="text-[11px] text-slate-400 border-l border-slate-200 pl-2">
+                    Updated {lastUpdatedTime}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={handleRefresh}
+                  disabled={isRefreshing}
+                  className="ml-1 text-[11px] font-bold text-[#0f4c75] hover:text-[#0b334f] hover:underline cursor-pointer disabled:opacity-50"
+                >
+                  Sync Now
+                </button>
+              </div>
             </div>
 
             {/* Search and Filters Card */}
