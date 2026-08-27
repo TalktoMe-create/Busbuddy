@@ -1,0 +1,6 @@
+{
+  "name": "BusBuddy",
+  "description": "NextBus Arrival Timings and real-time public bus arrival tracking application.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
