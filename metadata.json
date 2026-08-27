@@ -1,6 +1,6 @@
 {
   "name": "BusBuddy",
-  "description": "NextBus Arrival Timings and real-time public bus arrival tracking application.",
+  "description": "NextBus Arrival Timings with integrated interactive transit map view, live arrival schedule, and nearby alternative bus stops.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
